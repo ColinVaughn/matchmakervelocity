@@ -3,6 +3,7 @@ package org.texbobcat.matchmakervelocity;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
+import net.kyori.adventure.text.Component;
 
 import java.time.Duration;
 import java.util.*;
@@ -13,6 +14,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 import java.time.Instant;
+
+import java.util.concurrent.*;
+import java.util.logging.Logger;
+import java.util.*;
+import java.time.Instant;
+import java.time.Duration;
+
+import java.util.concurrent.*;
+import java.util.logging.Logger;
+import java.util.*;
+import java.time.Instant;
+import java.time.Duration;
 
 import java.util.concurrent.*;
 import java.util.logging.Logger;
@@ -38,12 +51,15 @@ public class MatchMaker {
     private static final int BASE_MMR_THRESHOLD = 100;
     private static final int MAX_QUEUE_WAIT_TIME = 300; // max seconds for queue
     private static final int RECHECK_INTERVAL = 5; // recheck every 5 seconds
+    private static final int ESTIMATED_MATCH_FORMATION_TIME = 120; // estimated time to form a match in seconds
+    private static final int MESSAGE_INTERVAL = 30; // interval to send queue time messages to players in seconds
 
     public MatchMaker(DatabaseManager databaseManager, ProxyServer server, Logger logger) {
         this.databaseManager = databaseManager;
         this.server = server;
         this.logger = logger;
         this.scheduler.scheduleAtFixedRate(this::recheckQueues, RECHECK_INTERVAL, RECHECK_INTERVAL, TimeUnit.SECONDS);
+        this.scheduler.scheduleAtFixedRate(this::sendQueueTimeMessages, MESSAGE_INTERVAL, MESSAGE_INTERVAL, TimeUnit.SECONDS);
     }
 
     public void addToQueue(Player player, String mode) {
@@ -107,6 +123,32 @@ public class MatchMaker {
         findMatch(mode);
     }
 
+    // Send queue time updates and estimated wait time to each player in the queue
+    private void sendQueueTimeMessages() {
+        matchmakingQueues.forEach((mode, queue) -> {
+            int queueSize = queue.size();
+            int averageWaitTimePerPlayer = queueSize > 0 ? ESTIMATED_MATCH_FORMATION_TIME / queueSize : 0;
+
+            int position = 0;
+            for (Player player : queue) {
+                UUID playerId = player.getUniqueId();
+                Instant joinTime = playerQueueTimes.get(playerId);
+
+                if (joinTime != null) {
+                    long timeInQueue = Duration.between(joinTime, Instant.now()).getSeconds();
+                    int estimatedWaitTime = averageWaitTimePerPlayer * position;
+
+                    // Send message to the player
+                    server.getPlayer(playerId).ifPresent(p ->
+                            p.sendMessage(Component.text("You have been in queue for " + timeInQueue + " seconds. "
+                                    + "Estimated time remaining: " + estimatedWaitTime + " seconds."))
+                    );
+                }
+                position++;
+            }
+        });
+    }
+
     // Get players sorted by wait time with an enhanced MMR threshold based on queue size and wait time
     private List<Player> getMMRCompatiblePlayers(Queue<Player> queue, int requiredPlayers, String mode) {
         List<Player> sortedPlayers = new ArrayList<>(queue);
@@ -158,15 +200,21 @@ public class MatchMaker {
     private void assignPlayersToServer(List<Player> players, DatabaseManager.ServerInfo serverInfo) {
         String matchTag = UUID.randomUUID().toString();
 
+        // Set server to running with the match tag
+        databaseManager.updateServerStatusWithTag(serverInfo.serverName, matchTag);
+
+        // Assign match tag to each player and move them to the server
         players.forEach(player -> {
             playerMatches.put(player.getUniqueId(), new MatchInfo(matchTag, serverInfo.serverName));
             databaseManager.assignMatchTag(player.getUniqueId().toString(), matchTag);
             playerQueueMode.remove(player.getUniqueId());
             playerQueueTimes.remove(player.getUniqueId());
-            server.getPlayer(player.getUniqueId()).ifPresent(p -> p.createConnectionRequest(server.getServer(serverInfo.serverName).get()).fireAndForget());
+            server.getPlayer(player.getUniqueId()).ifPresent(p ->
+                    p.createConnectionRequest(server.getServer(serverInfo.serverName).get()).fireAndForget()
+            );
         });
 
-        logger.info("Match created on server " + serverInfo.serverName + " for players: " + players);
+        logger.info("Match with tag " + matchTag + " created on server " + serverInfo.serverName + " for players: " + players);
     }
 
     private void removeFromQueue(Player player, String mode) {
@@ -207,30 +255,53 @@ public class MatchMaker {
         }
     }
 
+
     public void handlePlayerReconnection(Player player) {
+        logger.info("Attempting to reconnect player: " + player.getUsername() + " with UUID: " + player.getUniqueId());
+
+        // Retrieve the match tag for the player
         String playerId = player.getUniqueId().toString();
         String matchTag = databaseManager.getPlayerMatchTag(playerId);
 
-        if (matchTag != null) {
-            Optional<DatabaseManager.ServerInfo> serverInfo = databaseManager.getServerByMatchTag(matchTag);
-            if (serverInfo.isPresent()) {
-                String serverName = serverInfo.get().serverName;
-                Optional<RegisteredServer> targetServer = server.getServer(serverName);
-
-                if (targetServer.isPresent()) {
-                    player.createConnectionRequest(targetServer.get()).fireAndForget();
-                    logger.info("Player " + player.getUsername() + " reconnected to match on server " + serverName);
-                } else {
-                    logger.warning("Server " + serverName + " not available for match reconnection for player " + player.getUsername());
-                }
-            } else {
-                logger.info("No running server found for match tag: " + matchTag + " for player " + player.getUsername());
-            }
-        } else {
-            logger.info("Player " + player.getUsername() + " has no match to reconnect to.");
+        if (matchTag == null) {
+            logger.warning("No match tag found for player: " + player.getUsername() + " (UUID: " + playerId + ")");
+            return;
         }
+        logger.info("Found match tag: " + matchTag + " for player: " + player.getUsername());
+
+        // Attempt to find a server running with this match tag
+        Optional<DatabaseManager.ServerInfo> serverInfo = databaseManager.getServerByMatchTag(matchTag);
+        if (!serverInfo.isPresent()) {
+            logger.warning("No running server found for match tag: " + matchTag + " for player: " + player.getUsername());
+            return;
+        }
+
+        String serverName = serverInfo.get().serverName;
+        logger.info("Found server: " + serverName + " with matching tag for player: " + player.getUsername());
+
+        // Verify if the server is registered and available in the proxy server list
+        Optional<RegisteredServer> targetServer = server.getServer(serverName);
+        if (!targetServer.isPresent()) {
+            logger.warning("Server " + serverName + " is not registered or available for match reconnection for player: " + player.getUsername());
+            return;
+        }
+
+        // Delay the reconnection to give time for the server connection to fully establish
+        scheduler.schedule(() -> {
+            try {
+                // Attempt to reconnect the player to the appropriate server
+                player.createConnectionRequest(targetServer.get()).fireAndForget();
+                logger.info("Successfully reconnected player " + player.getUsername() + " to server " + serverName);
+            } catch (Exception e) {
+                logger.severe("Error while reconnecting player " + player.getUsername() + " to server " + serverName + ": " + e.getMessage());
+            }
+        }, 1, TimeUnit.SECONDS); // Delay of 1 second before attempting to reconnect
     }
+
+
 }
+
+
 
 
 

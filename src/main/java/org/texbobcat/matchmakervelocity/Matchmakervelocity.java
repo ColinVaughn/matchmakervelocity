@@ -18,6 +18,12 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.logging.Logger;
 
+import com.velocitypowered.api.event.connection.PostLoginEvent;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.logging.Logger;
+
 @Plugin(
         id = "matchmakervelocity",
         name = "matchmakervelocity",
@@ -42,21 +48,24 @@ public class Matchmakervelocity {
             this.logger.info("Database connection successful.");
             this.matchmaker = new MatchMaker(this.databaseManager, this.server, this.logger);
             this.logger.info("Matchmaking system initialized.");
-            this.server.getChannelRegistrar().register(new ChannelIdentifier[]{MinecraftChannelIdentifier.create("matchmaking", "mode")});
+
             this.server.getEventManager().register(this, new Object() {
+                // Event listener for player post-login (use PostLoginEvent instead of LoginEvent)
                 @Subscribe
-                public void onPlayerLogin(LoginEvent event) {
-                    Optional<Player> playerOptional = Matchmakervelocity.this.server.getPlayer(event.getPlayer().getUniqueId());
-                    playerOptional.ifPresent((player) -> {
-                        Matchmakervelocity.this.matchmaker.handlePlayerReconnection(player);
-                    });
+                public void onPlayerPostLogin(PostLoginEvent event) {
+                    Player player = event.getPlayer();
+                    logger.info("PostLogin event triggered for player: " + player.getUsername() + " with UUID: " + player.getUniqueId());
+                    matchmaker.handlePlayerReconnection(player);
                 }
 
-                // New event listener for player disconnection
+                // Event listener for player disconnection
                 @Subscribe
                 public void onPlayerDisconnect(DisconnectEvent event) {
                     UUID playerUUID = event.getPlayer().getUniqueId();
-                    server.getPlayer(playerUUID).ifPresent(player -> matchmaker.removePlayerOnDisconnect(player));
+                    server.getPlayer(playerUUID).ifPresent(player -> {
+                        logger.info("Disconnect event triggered for player: " + player.getUsername());
+                        matchmaker.removePlayerOnDisconnect(player);
+                    });
                 }
             });
         } else {
