@@ -50,7 +50,6 @@ public class Matchmakervelocity {
             this.logger.info("Matchmaking system initialized.");
 
             this.server.getEventManager().register(this, new Object() {
-                // Event listener for player post-login (use PostLoginEvent instead of LoginEvent)
                 @Subscribe
                 public void onPlayerPostLogin(PostLoginEvent event) {
                     Player player = event.getPlayer();

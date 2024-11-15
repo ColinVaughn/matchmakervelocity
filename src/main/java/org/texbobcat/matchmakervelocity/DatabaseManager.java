@@ -30,8 +30,6 @@ public class DatabaseManager {
             Class.forName("com.mysql.cj.jdbc.Driver");
 
             connection = DriverManager.getConnection(url, username, password);
-
-            // Call the initializeDatabase method after a successful connection
             initializeDatabase();
             return true;
         } catch (Exception ignored) {
@@ -73,7 +71,6 @@ public class DatabaseManager {
                 Logger.getLogger("Found player with MMR: " + rs.getInt("mmr"));
                 return rs.getInt("mmr");
             } else {
-                // Insert player with default MMR if not exists
                 insertPlayer(playerId, 1200);
                 return 1200;
             }
@@ -125,7 +122,7 @@ public class DatabaseManager {
         } catch (SQLException e) {
             Logger.getLogger("DatabaseManager").severe("Error fetching match tag for player: " + e.getMessage());
         }
-        return null; // Return null if no match tag is found
+        return null;
     }
     public Optional<ServerInfo> getServerByMatchTag(String matchTag) {
         String query = "SELECT server, type FROM servers WHERE unique_match_tag = ? AND gamerunning = true LIMIT 1";
@@ -138,9 +135,8 @@ public class DatabaseManager {
         } catch (SQLException e) {
             Logger.getLogger("DatabaseManager").severe("Error fetching server for match tag: " + e.getMessage());
         }
-        return Optional.empty(); // Return empty if no matching server is found
+        return Optional.empty();
     }
-    // Method to clear match tag from a server
     public void clearServerMatchTag(String serverName) {
         String query = "UPDATE servers SET gamerunning = false, unique_match_tag = NULL WHERE server = ?";
         try (PreparedStatement stmt = connection.prepareStatement(query)) {

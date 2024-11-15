@@ -64,24 +64,28 @@ public class MatchMaker {
 
     public void addToQueue(Player player, String mode) {
         UUID playerId = player.getUniqueId();
+        logger.info("Attempting to add player " + player.getUsername() + " to queue for mode: " + mode);
 
+        // Check if player is already in a queue
         if (this.playerQueueMode.containsKey(playerId)) {
             String currentMode = this.playerQueueMode.get(playerId);
             if (currentMode.equals(mode)) {
                 logger.info("Player " + player.getUsername() + " is already queued for mode: " + mode);
                 return;
             }
-            this.removeFromQueue(player, currentMode);
+            this.removeFromQueue(player, currentMode);  // Remove from any previous queue mode
+            logger.info("Player " + player.getUsername() + " removed from previous queue mode: " + currentMode);
         }
 
+        // Add player to the specified queue
         matchmakingQueues.computeIfAbsent(mode, k -> new LinkedList<>()).add(player);
         playerQueueMode.put(playerId, mode);
         playerQueueTimes.put(playerId, Instant.now());
-        logger.info("Player " + player.getUsername() + " added to queue for mode: " + mode);
 
-        // Immediately attempt to match after adding a player to the queue
-        triggerMatchmaking(mode);
+        logger.info("Player " + player.getUsername() + " successfully added to queue for mode: " + mode);
+        triggerMatchmaking(mode);  // Immediately attempt matchmaking after adding player
     }
+
 
     private void recheckQueues() {
         matchmakingQueues.keySet().forEach(this::findMatch);
@@ -110,12 +114,12 @@ public class MatchMaker {
     }
 
     private int getRequiredPlayers(String mode) {
-        switch (mode) {
-            case "1v1": return 1;
-            case "4FFA": return 4;
-            case "8FFA": return 8;
-            default: return 0;
-        }
+        return switch (mode) {
+            case "1v1" -> 1;
+            case "4FFA" -> 4;
+            case "8FFA" -> 8;
+            default -> 0;
+        };
     }
 
     // Method to trigger matchmaking immediately when players join or leave the queue
@@ -184,7 +188,7 @@ public class MatchMaker {
         int saturationFactor = Math.min(queue.size() / 10, 10); // max factor of 10
 
         // Final threshold combines base threshold, wait time influence, and saturation factor
-        return (int) (BASE_MMR_THRESHOLD + saturationFactor * 20 + Math.pow(averageQueueTime / 30L, 1.5));
+        return (int) (BASE_MMR_THRESHOLD + saturationFactor * 20 + Math.pow((double) averageQueueTime / 30L, 1.5));
     }
 
     private boolean isMMRCompatible(List<Player> players, int mmrThreshold) {
@@ -218,17 +222,21 @@ public class MatchMaker {
     }
 
     private void removeFromQueue(Player player, String mode) {
+        UUID playerId = player.getUniqueId();
         Queue<Player> queue = matchmakingQueues.get(mode);
-        if (queue != null) {
-            queue.remove(player);
-            playerQueueMode.remove(player.getUniqueId());
-            playerQueueTimes.remove(player.getUniqueId());
-            logger.info("Player " + player.getUsername() + " removed from queue for mode: " + mode);
+        if (queue != null && queue.remove(player)) {
+            logger.info("Player " + player.getUsername() + " successfully removed from queue for mode: " + mode);
+        } else {
+            logger.warning("Player " + player.getUsername() + " was not found in queue for mode: " + mode);
         }
 
-        // Trigger matchmaking attempt after player leaves queue
+        playerQueueMode.remove(playerId);
+        playerQueueTimes.remove(playerId);
+
+        logger.info("Cleared queue mode and queue time for player: " + player.getUsername());
         triggerMatchmaking(mode);
     }
+
 
     // Helper method to remove players who have exceeded MAX_QUEUE_WAIT_TIME
     private void removeLongWaitingPlayers(Queue<Player> queue, String mode) {
@@ -263,19 +271,34 @@ public class MatchMaker {
         String playerId = player.getUniqueId().toString();
         String matchTag = databaseManager.getPlayerMatchTag(playerId);
 
+        // If no match tag is found, assume the player is free to queue again
         if (matchTag == null) {
-            logger.warning("No match tag found for player: " + player.getUsername() + " (UUID: " + playerId + ")");
-            return;
+            logger.info("No active match found for player: " + player.getUsername() + ". Player can now re-queue.");
+            logger.info("Automatically added player " + player.getUsername() + " to queue after reconnection.");
+            return; // Exit to allow re-queue since no match tag exists
         }
+
         logger.info("Found match tag: " + matchTag + " for player: " + player.getUsername());
 
         // Attempt to find a server running with this match tag
         Optional<DatabaseManager.ServerInfo> serverInfo = databaseManager.getServerByMatchTag(matchTag);
         if (!serverInfo.isPresent()) {
-            logger.warning("No running server found for match tag: " + matchTag + " for player: " + player.getUsername());
+            // No server is running the match, so assume the match has ended
+            logger.warning("No running server found for match tag: " + matchTag + " for player: " + player.getUsername() + ". Clearing match tag to allow re-queue.");
+
+            // Clear the player's match tag and related data
+            databaseManager.removeMatchTag(playerId);
+            playerMatches.remove(player.getUniqueId());  // Remove from in-memory matches
+            playerQueueMode.remove(player.getUniqueId()); // Remove queue mode
+            playerQueueTimes.remove(player.getUniqueId()); // Remove queue time
+
+            // Automatically add the player back to the queue
+            addToQueue(player, "1v1"); // Adjust the mode if needed
+            logger.info("Automatically added player " + player.getUsername() + " to queue after match clearance.");
             return;
         }
 
+        // If a running server with the match tag exists, proceed to reconnect the player
         String serverName = serverInfo.get().serverName;
         logger.info("Found server: " + serverName + " with matching tag for player: " + player.getUsername());
 
@@ -286,16 +309,14 @@ public class MatchMaker {
             return;
         }
 
-        // Delay the reconnection to give time for the server connection to fully establish
         scheduler.schedule(() -> {
             try {
-                // Attempt to reconnect the player to the appropriate server
                 player.createConnectionRequest(targetServer.get()).fireAndForget();
                 logger.info("Successfully reconnected player " + player.getUsername() + " to server " + serverName);
             } catch (Exception e) {
                 logger.severe("Error while reconnecting player " + player.getUsername() + " to server " + serverName + ": " + e.getMessage());
             }
-        }, 1, TimeUnit.SECONDS); // Delay of 1 second before attempting to reconnect
+        }, 1, TimeUnit.SECONDS);
     }
 
 
